@@ -12,10 +12,15 @@ from telegram.ext import MessageHandler, filters
 
 import requests
 from dotenv import load_dotenv
+from db import list_company_codes_filtered
 
 from telegram import Update
 from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, ContextTypes
+
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ContextTypes
+from telegram.ext import CallbackQueryHandler, MessageHandler, filters
 
 from db import (
     ensure_user,
@@ -47,11 +52,14 @@ if not BOT_TOKEN:
     raise SystemExit("❌ BOT_TOKEN boşdur. .env faylında BOT_TOKEN yaz.")
 
 ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0") or "0")
-DEFAULT_MAX_USERS = int(os.getenv("DEFAULT_MAX_USERS", "3") or "3")
+DEFAULT_MAX_USERS = int(os.getenv("DEFAULT_MAX_USERS", "1") or "1")
 ACCESS_DAYS = int(os.getenv("ACCESS_DAYS", "30") or "30")
 
+
 def is_admin(chat_id: int) -> bool:
+    # return 1
     return ADMIN_CHAT_ID != 0 and chat_id == ADMIN_CHAT_ID
+
 
 ACTIVE_ONLY = os.getenv("ACTIVE_ONLY", "1").strip() == "1"
 DAYS_BACK = int(os.getenv("DAYS_BACK", "60"))
@@ -61,7 +69,7 @@ SMART_PAGE_SIZE = int(os.getenv("SMART_PAGE_SIZE", "25"))
 
 REQUEST_TIMEOUT = float(os.getenv("REQUEST_TIMEOUT", "10"))
 LIST_TTL_SEC = int(os.getenv("LIST_TTL_SEC", "180"))  # cache list pages (seconds)
-CAND_TTL_SEC = int(os.getenv("CAND_TTL_SEC", "60"))   # cache merged candidates (seconds)
+CAND_TTL_SEC = int(os.getenv("CAND_TTL_SEC", "60"))  # cache merged candidates (seconds)
 MAX_DETAIL_CHECK = int(os.getenv("MAX_DETAIL_CHECK", "250"))  # safety cap when query needs detail
 
 DEBUG_MATCH = os.getenv("DEBUG_MATCH", "1").strip() == "1"  # можно 0 чтобы выключить
@@ -86,22 +94,24 @@ HEADERS = {
 SESSION = requests.Session()
 SESSION.headers.update(HEADERS)
 
+
 async def async_get(url: str, *, params=None, headers=None, timeout: float = REQUEST_TIMEOUT):
     """Run blocking requests.get in a thread to avoid blocking the asyncio event loop."""
+
     def _do():
         h = headers or HEADERS
         return SESSION.get(url, params=params, headers=h, timeout=timeout)
+
     return await asyncio.to_thread(_do)
 
 
 PAYWALL_AZ = (
-    "🔒 *Bu bot yalnız ödənişli girişlə işləyir.*\n\n"
-    "Şirkətinizdən aldığınız kodu aktiv edin:\n"
-    "`/redeem KOD`\n\n"
-    "Məsələn:\n"
-    "`/redeem ABCD-1234-EF`\n"
-    "Suallar - @IsmayilGurbanaliyev"
+    "🔒 *Giriş aktiv deyil.*\n\n"
+    "Bu botdan istifadə etmək üçün ödəniş tələb olunur.\n\n"
+    "👉 *Botu aktivləşdirmək üçün indi* `/start` *yazın.*\n\n"
+    "ℹ️ Hazırda hesabınız ödənişli deyil."
 )
+
 
 def user_commands_text(is_paid: bool) -> str:
     if is_paid:
@@ -122,13 +132,16 @@ def user_commands_text(is_paid: bool) -> str:
         "• `/redeem ABCD-1234-EF`\n"
     )
 
+
 def require_paid(chat_id: int) -> bool:
     if is_admin(chat_id):
         return True
     return is_paid_active(chat_id)
 
+
 async def send_paywall(update: Update):
     await update.message.reply_text(PAYWALL_AZ, parse_mode=ParseMode.MARKDOWN)
+
 
 # ======================
 # SMART MATCH
@@ -336,9 +349,11 @@ PRESET_COMMANDS = {
     ]
 }
 
+
 def _tokenize_haystack_words(haystack: str) -> List[str]:
     h_fold = normalize_text(fold_diacritics(haystack))
     return [w for w in re.split(r"[^a-z0-9]+", h_fold) if w]
+
 
 def token_match_debug(token: str, haystack: str) -> Dict:
     """
@@ -395,7 +410,7 @@ def token_match_debug(token: str, haystack: str) -> Dict:
                         "method": "fuzzy",
                         "token": token_norm,
                         "variant": v_norm,
-                        "evidence": f"fuzzy('{v_norm}', '{w}')={round(ratio,3)} >= 0.85",
+                        "evidence": f"fuzzy('{v_norm}', '{w}')={round(ratio, 3)} >= 0.85",
                         "checks": sorted(checks, key=lambda x: x["ratio"], reverse=True)[:8],
                     }
 
@@ -407,6 +422,7 @@ def token_match_debug(token: str, haystack: str) -> Dict:
         "evidence": "no match",
         "checks": sorted(checks, key=lambda x: x["ratio"], reverse=True)[:8],
     }
+
 
 def full_query_match_debug(query: str, haystack: str) -> Dict:
     """
@@ -426,8 +442,10 @@ def full_query_match_debug(query: str, haystack: str) -> Dict:
 
     return {"matched": True, "reason": "all tokens matched", "tokens": results}
 
+
 def fold_diacritics(s: str) -> str:
     return s.translate(AZ_DIACRITICS_MAP)
+
 
 def normalize_text(s: str) -> str:
     s = unicodedata.normalize("NFKD", s)
@@ -435,10 +453,12 @@ def normalize_text(s: str) -> str:
     s = re.sub(r"\s+", " ", s)
     return s
 
+
 def tokenize_query(q: str) -> List[str]:
     q = normalize_text(q)
     parts = re.split(r"[,\s]+", q)
     return [p for p in parts if p]
+
 
 def generate_variants(token: str) -> List[str]:
     t0 = normalize_text(token)
@@ -470,10 +490,12 @@ def generate_variants(token: str) -> List[str]:
     final.sort(key=lambda x: (x != t0, len(x)))
     return final
 
+
 def fuzzy_ratio(a: str, b: str) -> float:
     a = normalize_text(fold_diacritics(a))
     b = normalize_text(fold_diacritics(b))
     return SequenceMatcher(None, a, b).ratio()
+
 
 def token_match(token_variants: List[str], haystack: str) -> bool:
     h = normalize_text(haystack)
@@ -496,6 +518,7 @@ def token_match(token_variants: List[str], haystack: str) -> bool:
 
     return False
 
+
 def full_query_match(query: str, haystack: str) -> bool:
     tokens = tokenize_query(query)
     tokens = [t for t in tokens if len(t) >= 3]
@@ -505,6 +528,7 @@ def full_query_match(query: str, haystack: str) -> bool:
         if not token_match(generate_variants(t), haystack):
             return False
     return True
+
 
 # ======================
 # DATE FILTERS
@@ -519,6 +543,7 @@ def parse_dt(s: str) -> Optional[datetime]:
     except Exception:
         return None
 
+
 def is_active_item(item: Dict) -> bool:
     if not ACTIVE_ONLY:
         return True
@@ -528,6 +553,7 @@ def is_active_item(item: Dict) -> bool:
     if end_dt.tzinfo is None:
         end_dt = end_dt.replace(tzinfo=timezone.utc)
     return end_dt >= datetime.now(timezone.utc)
+
 
 def is_fresh_item(item: Dict) -> bool:
     if DAYS_BACK <= 0:
@@ -539,8 +565,10 @@ def is_fresh_item(item: Dict) -> bool:
         pub_dt = pub_dt.replace(tzinfo=timezone.utc)
     return pub_dt >= datetime.now(timezone.utc) - timedelta(days=DAYS_BACK)
 
+
 def filter_item(item: Dict) -> bool:
     return is_active_item(item) and is_fresh_item(item)
+
 
 # ======================
 # API FETCH
@@ -561,6 +589,7 @@ LIST_CACHE: Dict[Tuple[int, int, int, int], Tuple[float, List[Dict], Optional[st
 
 EVENT_DETAIL_URL = "https://etender.gov.az/api/events/"
 
+
 def fetch_event_detail(event_id: str) -> Optional[Dict]:
     now = datetime.now(timezone.utc).timestamp()
     cached = DETAIL_CACHE.get(event_id)
@@ -576,7 +605,6 @@ def fetch_event_detail(event_id: str) -> Optional[Dict]:
         if r.status_code >= 400:
             return None
 
-
         data = r.json()
         if isinstance(data, dict) and data.get("id"):
             DETAIL_CACHE[event_id] = (now, data)
@@ -585,6 +613,7 @@ def fetch_event_detail(event_id: str) -> Optional[Dict]:
         return None
 
     return None
+
 
 def make_params(page_number: int, page_size: int) -> Dict:
     return {
@@ -601,6 +630,7 @@ def make_params(page_number: int, page_size: int) -> Dict:
         "DocumentViewType": "",
     }
 
+
 def fetch_events_page(page_number: int, page_size: int) -> Tuple[List[Dict], Optional[str]]:
     key = (DEFAULT_EVENT_TYPE, DEFAULT_EVENT_STATUS, page_number, page_size)
     now = datetime.now(timezone.utc).timestamp()
@@ -616,6 +646,7 @@ def fetch_events_page(page_number: int, page_size: int) -> Tuple[List[Dict], Opt
             headers=HEADERS,
             timeout=REQUEST_TIMEOUT,
         )
+
     except Exception as e:
         return [], f"HTTP error: {e}"
 
@@ -644,12 +675,14 @@ def fetch_events_page(page_number: int, page_size: int) -> Tuple[List[Dict], Opt
     LIST_CACHE[key] = (now, items, None)
     return items, None
 
+
 def extract_id(item: Dict) -> str:
     for k in ["eventId", "EventId", "id", "Id"]:
         v = item.get(k)
         if v is not None and str(v).strip():
             return str(v).strip()
     return ""
+
 
 def extract_text_list_only(item: Dict) -> str:
     parts: List[str] = []
@@ -658,6 +691,7 @@ def extract_text_list_only(item: Dict) -> str:
         if isinstance(v, str) and v.strip():
             parts.append(v.strip())
     return " ".join(parts)
+
 
 def extract_text(item: Dict) -> str:
     parts = []
@@ -686,6 +720,7 @@ def extract_text(item: Dict) -> str:
 
     return " ".join(parts)
 
+
 def extract_display_text(item: Dict) -> str:
     parts = []
     for k in ["eventName", "EventName", "buyerOrganizationName", "BuyerOrganizationName"]:
@@ -704,6 +739,7 @@ def extract_display_text(item: Dict) -> str:
                     parts.append(v.strip())
 
     return " ".join(parts).strip()
+
 
 def get_candidate_items() -> List[Dict]:
     now = datetime.now(timezone.utc).timestamp()
@@ -773,7 +809,6 @@ def smart_search(query: str) -> List[Dict]:
         text = extract_text(it)  # may fetch detail
         if text and full_query_match(q, text):
             matched.append(it)
-
     return matched
 
 
@@ -805,6 +840,7 @@ def format_search_results(items: List[Dict], query: str, limit: int) -> str:
 
     return "\n\n".join(out)
 
+
 def format_new_notification(query: str, it: Dict) -> str:
     tid = extract_id(it)
     text = extract_display_text(it)  # ✅ БЕЗ categoryCodes
@@ -815,6 +851,8 @@ def format_new_notification(query: str, it: Dict) -> str:
         f"{text}\n"
         f"{url}"
     )
+
+
 # ======================
 # COMMANDS
 # ======================
@@ -829,8 +867,10 @@ def _fmt_timedelta(dt: datetime) -> str:
         return f"{sec // 3600} saat"
     return f"{sec // 86400} gün"
 
+
 def _get_query(context: ContextTypes.DEFAULT_TYPE) -> str:
     return " ".join(context.args).strip()
+
 
 def _extract_id_from_arg(s: str) -> str:
     s = (s or "").strip()
@@ -841,6 +881,7 @@ def _extract_id_from_arg(s: str) -> str:
         return m.group(1)
     return s if s.isdigit() else ""
 
+
 def find_candidate_by_id(event_id: str) -> Optional[Dict]:
     # ищем в текущих candidates (те же страницы и фильтры)
     candidates = get_candidate_items()
@@ -848,6 +889,7 @@ def find_candidate_by_id(event_id: str) -> Optional[Dict]:
         if extract_id(it) == str(event_id):
             return it
     return None
+
 
 async def cmd_debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -909,34 +951,191 @@ async def cmd_debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True)
 
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     ensure_user(chat_id)
 
-    if require_paid(chat_id):
+    if not require_paid(chat_id):
         msg = (
-            "Salam! ✅ Giriş aktivdir.\n\n"
-            "Komandalar:\n"
-            "• /search söz (etender axtariwi(agilli axtariw))\n"
-            "• /subscribe söz (her 6 saat axtariw uzre yeni tender verir)\n"
-            "• /unsubscribe söz\n"
-            "• /subs (aktiv abuneler)\n"
-            "Suallar - @IsmayilGurbanaliyev\n"
+            "🤖 *Bu botdan istifadə yalnız ödəniş əsasında mümkündür.*\n\n"
+            "Botdan tam şəkildə istifadə etmək üçün aşağıdakı tələbləri yerinə yetirməyiniz xahiş olunur:\n"
+            "1️⃣ 30 AZN məbləğini göstərilən karta köçürün\n"
+            "2️⃣ Aşağıdakı düyməyə basın və ödənişi təsdiq edən qəbzin (çekin) surətini bu çata göndərin\n"
+            "3️⃣ Ödəniş təsdiqləndikdən sonra Sizə *fərdi aktivasiya kodu* təqdim olunacaq\n\n"
+            "💵 *LEOBANK:* 5411249804847916\n\n"
+            "💵 *ATB:* 5374395183489534\n\n"
+            "ℹ️ *Qaydalar:*\n"
+            "• Aktivasiya *yalnız 1 istifadəçi* üçün keçərlidir\n"
+            "• Maksimum *5 açar söz üzrə abunəlik* mümkündür\n\n"
+            "Aktivasiya kodunu aldıqdan sonra aşağıdakı əmri daxil edin:\n\n"
+            "`/redeem KOD`\n\n"
+            "*Nümunə:*\n"
+            "`/redeem ABCD-1234-EF`\n\n"
+            "Aktivasiya uğurla tamamlandıqdan sonra botun bütün funksiyalarından istifadə edə biləcəksiniz.\n\n"
+            "📩 Suallar və əlavə məlumat üçün: @IsmayilGurbanaliyev"
         )
-        await update.message.reply_text(msg)
+
+        keyboard = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("🧾 Ödəniş qəbzini göndər", callback_data="send_receipt")]]
+        )
+
+        await update.message.reply_text(
+            msg,
+            reply_markup=keyboard,
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+
+    # Paid / admin user
+    await update.message.reply_text(
+        "✅ *Giriş aktivdir.*\n\n" + user_commands_text(True),
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+
+async def receipt_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "send_receipt":
+        # помечаем, что ждём чек
+        context.user_data["awaiting_receipt"] = True
+
+        # try:
+        # 	await query.message.delete()
+        # except Exception as e:
+        # 	print(f"⚠️ Не удалось удалить сообщение: {e}")
+
+        await query.message.reply_text("Ödəniş qəbzinin ekran görüntüsünü göndərin")
+
+
+
+
+
+async def receipt_photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.user_data.get("awaiting_receipt"):
+        await update.message.reply_text(
+            "⚠️ Qəbz göndərmək üçün əvvəlcə /start yazın və düyməyə basın."
+        )
+        return
+
+    photo = update.message.photo[-1]  # самое большое фото
+    user = update.effective_user
+
+    # создаем inline-кнопки для админа
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ Təsdiqlə", callback_data=f"approve_{user.id}"),
+            InlineKeyboardButton("❌ Rədd et", callback_data=f"reject_{user.id}")
+        ]
+    ])
+
+    # отправляем админу
+    await context.bot.send_photo(
+        chat_id=ADMIN_CHAT_ID,
+        photo=photo.file_id,
+        caption=(
+            "🧾 Yeni ödəniş qəbzi\n\n"
+            f"👤 User: @{user.username or 'yoxdur'}\n"
+            f"🆔 ID: {user.id}"
+        ),
+        reply_markup=keyboard
+    )
+
+    # убираем флаг ожидания
+    context.user_data["awaiting_receipt"] = False
+
+    # отвечаем пользователю
+    await update.message.reply_text(
+        "⏳ Ödəniş gözləmədədir\n\n"
+        "Ödənişiniz qəbul olundu. Zəhmət olmasa gözləyin — "
+        "ödəniş 24 saat ərzində yoxlanılacaq və təsdiqlənəcək.\n\n"
+        "Təsdiqdən sonra girişiniz aktiv ediləcək."
+    )
+
+
+async def admin_receipt_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    data = query.data
+    # формат callback_data: approve_USERID или reject_USERID
+    action, user_id_str = data.split("_")
+    user_id = int(user_id_str)
+
+    if action == "approve":
+        # ✅ Генерируем код доступа пользователю
+        company_name = "Ödənişli istifadəçi"  # можно кастомизировать
+        max_users = DEFAULT_MAX_USERS
+        duration_days = ACCESS_DAYS  # стандартная длительность
+        MAX_SUBS_PER_USER = 5
+        code = _gen_code()
+        create_company_code(code, company_name, max_users=max_users, duration_days=duration_days)
+
+        # Составляем текст для пользователя
+        user_text = (
+            f"✅ Ödəniş təsdiqləndi — abunə aktivdir\n\n"
+            f"Ödənişiniz uğurla keçdi, abunəliyiniz aktivləşdirildi.\n\n"
+            f"🔑 Aktivasiya kodu:\n{code}\n\n"
+            f"📌 Təlimat:\nAktivasiya üçün botda bu əmri yazın:\n/redeem {code}\n\n"
+            f"👥 Aktivləşdirə bilən istifadəçi sayı:\n{max_users} nəfər\n\n"
+            f"🔎 Tender axtarışı üzrə abunə limiti:\n{MAX_SUBS_PER_USER} açar söz\n\n"
+            f"♾️ Axtarış:\nLimitsiz\n\n"
+            f"Hər hansı sualınız olarsa, bizimlə əlaqə saxlaya bilərsiniz. @IsmayilGurbanaliyev\n\n"
+            f"📌 *Komandalar:*\n"
+            f"• `/search söz (tender saytinda axtariw(agilli axtariw))`\n"
+            f"• `/subscribe söz ( her 6 saat tender axtarir ve tapsa yolluyur`\n"
+            f"• `/unsubscribe söz`\n"
+            f"• `/subs (abune olan tenderleri gorsedir)`\n"
+        )
+
+        # Отправляем пользователю
+        try:
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=user_text,
+                parse_mode=ParseMode.MARKDOWN
+            )
+        except Exception as e:
+            print(f"⚠️ Не удалось отправить код пользователю {user_id}: {e}")
+
+        # Текст для админа
+        text = f"✅ Ödəniş təsdiqləndi.\nİstifadəçi {user_id} aktivasiya kodu alıb."
+
     else:
-        await send_paywall(update)
+        # ❌ Отказ
+        try:
+            await context.bot.send_message(
+                chat_id=user_id,
+                text="❌ Təəssüf! Ödənişiniz kecmedi. Daha ətraflı məlumat üçün admin ilə əlaqə saxlayın. @IsmayilGurbanaliyev"
+            )
+        except Exception as e:
+            print(f"⚠️ Не удалось уведомить пользователя {user_id} об отказе: {e}")
+
+        text = f"❌ Ödəniş rədd edildi.\nİstifadəçi {user_id} üçün."
+
+    # Редактируем сообщение админа, чтобы кнопки исчезли
+    try:
+        await query.edit_message_caption(caption=text)
+    except Exception as e:
+        print(f"⚠️ Не удалось изменить сообщение админа: {e}")
+
 
 async def cmd_redeem(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     ensure_user(chat_id)
 
     code = _get_query(context).strip()
+    print(code)
+
     if not code:
         await update.message.reply_text("İstifadə: /redeem KOD")
         return
 
-    ok, msg, expires = redeem_code(chat_id, code, duration_days=ACCESS_DAYS)
+    # Используем None как значение по умолчанию, чтобы функция redeem_code
+    # использовала duration_days из кода
+    ok, msg, expires = redeem_code(chat_id, code, duration_days=None)
     if not ok:
         await update.message.reply_text("❌ " + msg)
         return
@@ -944,7 +1143,26 @@ async def cmd_redeem(update: Update, context: ContextTypes.DEFAULT_TYPE):
     exp_txt = expires.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC") if expires else ""
     await update.message.reply_text(f"{msg}\n⏳ Bitmə tarixi: {exp_txt}")
 
+
+# async def cmd_redeem(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# 	chat_id = update.effective_chat.id
+# 	ensure_user(chat_id)
+
+# 	code = _get_query(context).strip()
+# 	if not code:
+# 		await update.message.reply_text("İstifadə: /redeem KOD")
+# 		return
+
+# 	ok, msg, expires = redeem_code(chat_id, code, duration_days=ACCESS_DAYS)
+# 	if not ok:
+# 		await update.message.reply_text("❌ " + msg)
+# 		return
+
+# 	exp_txt = expires.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC") if expires else ""
+# 	await update.message.reply_text(f"{msg}\n⏳ Bitmə tarixi: {exp_txt}")
+
 TG_MAX = 3900  # запас, чтобы точно не упереться
+
 
 async def send_long(update: Update, text: str, *, parse_mode=None, preview=False):
     parts = text.split("\n\n")
@@ -965,6 +1183,45 @@ async def send_long(update: Update, text: str, *, parse_mode=None, preview=False
 
     if chunk:
         await update.message.reply_text(chunk, parse_mode=parse_mode, disable_web_page_preview=not preview)
+
+async def cmd_codes(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    if not is_admin(chat_id):
+        await update.message.reply_text("⛔ Admin only.")
+        return
+
+    # Usage: /codes [all|used|unused|expired|active|inactive] [limit]
+    args = context.args or []
+    status = args[0].lower() if len(args) >= 1 else "all"
+    limit = int(args[1]) if len(args) >= 2 and args[1].isdigit() else 50
+
+    rows = list_company_codes_filtered(status=status, limit=limit)
+
+    if not rows:
+        await update.message.reply_text("Heç nə tapılmadı.")
+        return
+
+    lines = [f"📦 *Codes* (filter: `{status}`, limit: `{limit}`)\n"]
+    for (code, company, max_users, duration_days, is_active, created_at,
+         total_users, active_users, latest_expires) in rows:
+
+        latest = latest_expires.strftime("%Y-%m-%d") if latest_expires else "—"
+        lines.append(
+            f"🔑 `{code}`\n"
+            f"🏢 {company}\n"
+            f"👥 used: *{total_users}* / {max_users} | active now: *{active_users}*\n"
+            f"📅 duration: {duration_days} gün | latest exp: {latest}\n"
+            f"✅ active code: {'Bəli' if is_active else 'Xeyr'}\n"
+        )
+
+    msg = "\n".join(lines)
+    # If message becomes too long, send in chunks
+    if len(msg) > 3500:
+        chunks = [msg[i:i+3500] for i in range(0, len(msg), 3500)]
+        for ch in chunks:
+            await update.message.reply_text(ch, parse_mode=ParseMode.MARKDOWN)
+    else:
+        await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
 
 async def cmd_preview(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -1019,15 +1276,16 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         access_line = "🔑 Access: yoxdur\n"
 
     msg = (
-        "🟢 Bot aktivdir\n"
-        f"⏱ Uptime: {uptime}\n"
-        f"👥 İstifadəçilər: {st.get('users', 0)}\n"
-        f"💳 Aktiv ödənişli: {st.get('paid_active', 0)}\n"
-        f"📌 Abunəliklər: {st.get('subs', 0)}\n"
-        f"🔁 Yoxlama intervalı: {CHECK_INTERVAL} san\n\n"
-        + access_line
+            "🟢 Bot aktivdir\n"
+            f"⏱ Uptime: {uptime}\n"
+            f"👥 İstifadəçilər: {st.get('users', 0)}\n"
+            f"💳 Aktiv ödənişli: {st.get('paid_active', 0)}\n"
+            f"📌 Abunəliklər: {st.get('subs', 0)}\n"
+            f"🔁 Yoxlama intervalı: {CHECK_INTERVAL} san\n\n"
+            + access_line
     )
     await update.message.reply_text(msg)
+
 
 async def cmd_preset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -1060,6 +1318,7 @@ async def cmd_preset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = format_search_results(items_all, cmd, RESULT_LIMIT)
     await send_long(update, text, parse_mode=None, preview=False)
 
+
 async def cmd_unknown(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     ensure_user(chat_id)
@@ -1069,6 +1328,7 @@ async def cmd_unknown(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(txt, parse_mode=ParseMode.MARKDOWN)
 
+
 async def on_plain_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     ensure_user(chat_id)
@@ -1077,6 +1337,7 @@ async def on_plain_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     txt = "ℹ️ Mən komandalarla işləyirəm.\n\n" + user_commands_text(paid)
 
     await update.message.reply_text(txt, parse_mode=ParseMode.MARKDOWN)
+
 
 async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -1095,6 +1356,7 @@ async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = format_search_results(items, q, RESULT_LIMIT)
     await send_long(update, text, parse_mode=None, preview=False)
 
+
 async def cmd_subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     if not require_paid(chat_id):
@@ -1108,7 +1370,7 @@ async def cmd_subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     ensure_user(chat_id)
 
-    MAX_SUBS_PER_USER = 7
+    MAX_SUBS_PER_USER = 5
 
     # ✅ LIMIT CHECK
     current_subs = list_subscriptions(chat_id)
@@ -1135,10 +1397,11 @@ async def cmd_subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         f"✅ Abunəlik əlavə olundu: *{q}*\n"
-        f"📊 İstifadə: {len(current_subs)+1}/{MAX_SUBS_PER_USER}\n"
+        f"📊 İstifadə: {len(current_subs) + 1}/{MAX_SUBS_PER_USER}\n"
         f"Yalnız *yeni tender* çıxanda bildiriş göndərəcəyəm.",
         parse_mode=ParseMode.MARKDOWN,
     )
+
 
 async def cmd_unsubscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -1157,6 +1420,7 @@ async def cmd_unsubscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("Bu sorğu üzrə abunəlik tapılmadı.")
 
+
 async def cmd_subs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     if not require_paid(chat_id):
@@ -1172,6 +1436,7 @@ async def cmd_subs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for q in subs:
         lines.append(f"• {q}")
     await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+
 
 async def cmd_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -1202,6 +1467,7 @@ async def cmd_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(f"✅ Hazırdır.\nUğurlu: {ok}\nXəta: {failed}")
 
+
 # ----------------------
 # ADMIN: codes
 # ----------------------
@@ -1212,35 +1478,80 @@ def _gen_code() -> str:
     c = "".join(secrets.choice(alphabet) for _ in range(2))
     return f"{a}-{b}-{c}"
 
+
 async def cmd_createcode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     if not is_admin(chat_id):
         await update.message.reply_text("⛔ Admin only.")
         return
 
-    # /createcode CompanyName 3
+    # /createcode CompanyName [max_users] [duration_days]
     text = update.message.text or ""
     rest = text.split(" ", 1)
     if len(rest) < 2 or not rest[1].strip():
-        await update.message.reply_text("İstifadə: /createcode <company_name> [max_users]")
+        await update.message.reply_text("İstifadə: /createcode <company_name> [max_users] [duration_days]")
         return
 
-    parts = rest[1].strip().rsplit(" ", 1)
-    if len(parts) == 2 and parts[1].isdigit():
+    parts = rest[1].strip().rsplit(" ", 2)
+
+    # Разбираем параметры
+    if len(parts) == 3 and parts[1].isdigit() and parts[2].isdigit():
         company_name = parts[0].strip()
         max_users = int(parts[1])
+        duration_days = int(parts[2])
+    elif len(parts) == 2 and parts[1].isdigit():
+        company_name = parts[0].strip()
+        max_users = int(parts[1])
+        duration_days = 30  # Значение по умолчанию (1 месяц)
     else:
         company_name = rest[1].strip()
         max_users = DEFAULT_MAX_USERS
+        duration_days = 30  # Значение по умолчанию (1 месяц)
 
     code = _gen_code()
-    create_company_code(code, company_name, max_users=max_users)
+    create_company_code(code, company_name, max_users=max_users, duration_days=duration_days)
 
     await update.message.reply_text(
-        f"✅ Kod yaradıldı\n🏢 {company_name}\n👥 Limit: {max_users}\n🔑 `{code}`\n\n"
+        f"✅ Kod yaradıldı\n"
+        f"🏢 Şirkət: {company_name}\n"
+        f"👥 İstifadəçi limiti: {max_users}\n"
+        f"📅 Aktivlik müddəti: {duration_days} gün\n"
+        f"🔑 Kod: `{code}`\n\n"
         f"İstifadə: `/redeem {code}`",
         parse_mode=ParseMode.MARKDOWN,
     )
+
+
+# async def cmd_createcode(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# 	chat_id = update.effective_chat.id
+# 	if not is_admin(chat_id):
+# 		await update.message.reply_text("⛔ Admin only.")
+# 		return
+
+# 	# /createcode CompanyName 3
+# 	text = update.message.text or ""
+# 	rest = text.split(" ", 1)
+# 	if len(rest) < 2 or not rest[1].strip():
+# 		await update.message.reply_text("İstifadə: /createcode <company_name> [max_users]")
+# 		return
+
+# 	parts = rest[1].strip().rsplit(" ", 1)
+# 	if len(parts) == 2 and parts[1].isdigit():
+# 		company_name = parts[0].strip()
+# 		max_users = int(parts[1])
+# 	else:
+# 		company_name = rest[1].strip()
+# 		max_users = DEFAULT_MAX_USERS
+
+# 	code = _gen_code()
+# 	create_company_code(code, company_name, max_users=max_users)
+
+# 	await update.message.reply_text(
+# 		f"✅ Kod yaradıldı\n🏢 {company_name}\n👥 Limit: {max_users}\n🔑 `{code}`\n\n"
+# 		f"İstifadə: `/redeem {code}`",
+# 		parse_mode=ParseMode.MARKDOWN,
+# 	)
+
 
 async def cmd_codeinfo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -1258,13 +1569,47 @@ async def cmd_codeinfo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Kod tapılmadı.")
         return
 
-    _, company_name, max_users, is_active = info
+    if len(info) == 4:  # Старый формат
+        _, company_name, max_users, is_active = info
+        duration_days = 30
+    else:
+        _, company_name, max_users, duration_days, is_active = info
+
     used = code_usage_count(code)
 
     await update.message.reply_text(
-        f"🔑 `{code}`\n🏢 {company_name}\n👥 {used}/{max_users}\n✅ Aktiv: {is_active}",
+        f"🔑 Kod: `{code}`\n"
+        f"🏢 Şirkət: {company_name}\n"
+        f"👥 İstifadəçi: {used}/{max_users}\n"
+        f"📅 Müddət: {duration_days} gün\n"
+        f"✅ Aktiv: {'Bəli' if is_active else 'Xeyr'}",
         parse_mode=ParseMode.MARKDOWN,
     )
+
+
+# async def cmd_codeinfo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# 	chat_id = update.effective_chat.id
+# 	if not is_admin(chat_id):
+# 		await update.message.reply_text("⛔ Admin only.")
+# 		return
+
+# 	code = _get_query(context).strip()
+# 	if not code:
+# 		await update.message.reply_text("İstifadə: /codeinfo <code>")
+# 		return
+
+# 	info = code_info(code)
+# 	if not info:
+# 		await update.message.reply_text("Kod tapılmadı.")
+# 		return
+
+# 	_, company_name, max_users, is_active = info
+# 	used = code_usage_count(code)
+
+# 	await update.message.reply_text(
+# 		f"🔑 `{code}`\n🏢 {company_name}\n👥 {used}/{max_users}\n✅ Aktiv: {is_active}",
+# 		parse_mode=ParseMode.MARKDOWN,
+# 	)
 
 async def cmd_revoke(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -1279,6 +1624,7 @@ async def cmd_revoke(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     deactivate_code(code)
     await update.message.reply_text("✅ Kod deaktiv edildi.\n")
+
 
 # ======================
 # BACKGROUND JOB
@@ -1327,6 +1673,7 @@ async def job_check_subscriptions(context: ContextTypes.DEFAULT_TYPE):
         # graceful shutdown
         return
 
+
 async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     if not is_admin(chat_id):
@@ -1346,6 +1693,7 @@ async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
 
+
 # ======================
 # ERROR HANDLER
 # ======================
@@ -1354,6 +1702,7 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
         print("❌ ERROR:", context.error)
     except Exception:
         pass
+
 
 # ======================
 # MAIN
@@ -1364,12 +1713,16 @@ def main():
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("redeem", cmd_redeem))
 
+    app.add_handler(CallbackQueryHandler(receipt_button_handler, pattern="^send_receipt$"))
+    app.add_handler(MessageHandler(filters.PHOTO, receipt_photo_handler))
+
     app.add_handler(CommandHandler("search", cmd_search))
     app.add_handler(CommandHandler("preview", cmd_preview))
     app.add_handler(CommandHandler("subscribe", cmd_subscribe))
     app.add_handler(CommandHandler("unsubscribe", cmd_unsubscribe))
     app.add_handler(CommandHandler("subs", cmd_subs))
     app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler("codes", cmd_codes))
 
     app.add_handler(CommandHandler("broadcast", cmd_broadcast))
     app.add_handler(CommandHandler("debug", cmd_debug))
@@ -1379,6 +1732,9 @@ def main():
     app.add_handler(CommandHandler("codeinfo", cmd_codeinfo))
     app.add_handler(CommandHandler("revoke", cmd_revoke))
     app.add_handler(CommandHandler("admin", cmd_admin))
+
+    app.add_handler(CallbackQueryHandler(admin_receipt_handler, pattern="^(approve|reject)_\d+$"))
+
     for preset in PRESET_COMMANDS.keys():
         app.add_handler(CommandHandler(preset, cmd_preset))
     # Unknown commands (must be after all other command handlers)
@@ -1395,7 +1751,8 @@ def main():
         print("⚠️ JobQueue yoxdur. requirements.txt-da python-telegram-bot[job-queue] olmalıdır.")
 
     print("✅ Telegram bot işə düşdü. (dayandırmaq üçün Ctrl+C)")
-    app.run_polling(close_loop=False)
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
+
 
 if __name__ == "__main__":
     main()
